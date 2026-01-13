@@ -1,4 +1,6 @@
-import json, os, re, tempfile
+"""API views for quiz creation, listing, and management using AI-powered content generation."""
+
+import json, os, re, tempfile, subprocess, whisper
 
 from django.db import transaction
 from django.contrib.auth.models import User
@@ -15,9 +17,16 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 class CreateQuizView(views.APIView):
+    """Handle quiz creation from YouTube video URLs using AI-generated content."""
+
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        """Create a new quiz from a YouTube video URL.
+
+        Extract transcript from video, generate quiz questions using AI,
+        and save the quiz with questions to the database.
+        """
         serializer = CreateQuizSerializer(data=request.data)
 
         if not serializer.is_valid():
@@ -30,7 +39,7 @@ class CreateQuizView(views.APIView):
             return response.Response({"error": "Invalid YouTube URL."}, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            transcript = self._get_transcript_with_ytdlp(normalized_url)
+            transcript = self._get_transcript_with_ytdlp_and_whisper(normalized_url)
             if not transcript or len(transcript.strip()) < 50:
                 return response.Response({"detail": "No Transcript Found."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -61,52 +70,71 @@ class CreateQuizView(views.APIView):
             return response.Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     def _normalize_youtube_url(self, url: str):
+        """Normalize YouTube URL to standard watch format.
+
+        Extracts video ID from various YouTube URL formats and returns
+        a standardized URL.
+        """
         m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{6,})", url)
         if not m:
             return None
         vid = m.group(1)
         return f"https://www.youtube.com/watch?v={vid}"
     
-    def _get_transcript_with_ytdlp(self, url: str):
+    def _get_transcript_with_ytdlp_and_whisper(self, url: str):
+        """Download video audio and transcribe it using Whisper.
+
+        Downloads audio from YouTube video, converts to WAV format,
+        and uses OpenAI Whisper for speech-to-text transcription.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "%(id)s.%(ext)s")
 
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": out,
-                "quiet": False,  # Ändere zu False für besseres Debugging
-                "noplaylist": True,
-                "skip_download": True,
-                "writesubtitles": True,
-                "writeautomaticsub": True,
-                "subtitlesformat": "vtt",
-                
-                # WICHTIG: Anti-Rate-Limiting
-                "extractor_retries": 5,
-                "retries": 10,
-                "sleep_interval": 2,
-                "max_sleep_interval": 8,
-                
+                "quiet": True,
+                "noplaylist": True, 
             }
 
             with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(url, download=True)
                 video_id = info.get("id")
-                if not video_id:
-                    return None
-                ydl.download([url])
 
-            vtt_files = [f for f in os.listdir(tmp) if f.startswith(video_id) and f.endswith(".vtt")]
-            if not vtt_files:
+            if not video_id:
                 return None
             
-            vtt_path = os.path.join(tmp, vtt_files[0])
-            with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
-                vtt_content = f.read()
+            downloaded = None
+
+            for f in os.listdir(tmp):
+                if f.startswith(video_id + "."):
+                    downloaded = os.path.join(tmp, f)
+                    break  
+
+            if not downloaded or not os.path.isfile(downloaded):
+                return None
             
-            return self._vtt_to_text(vtt_content)
+            wav_path = os.path.join(tmp, f"{video_id}.wav")
+
+            subprocess.run(["ffmpeg", "-y", "-i", downloaded, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path], 
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True               
+            )
+
+            model = whisper.load_model("base")
+            result = model.transcribe(wav_path)
+
+            text = (result.get("text") or "").strip()
+
+            return text if len(text) >= 50 else None
+
 
     def _vtt_to_text(self, vtt_content: str):
+        """Convert VTT subtitle content to plain text.
+
+        Removes VTT formatting, timestamps, and tags, returning clean text.
+        """
         lines = []
         for line in vtt_content.splitlines():
             line = line.strip()
@@ -127,6 +155,11 @@ class CreateQuizView(views.APIView):
         return text
 
     def _generate_quiz_with_gemini(self, transcript: str):
+        """Generate quiz questions from transcript using Google Gemini AI.
+
+        Sends transcript to Gemini API with structured prompt and
+        returns parsed JSON with quiz data.
+        """
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set.")
 
@@ -151,6 +184,10 @@ class CreateQuizView(views.APIView):
             raise ValueError(f"AI has failed the Job: {str(e)}")
 
     def _strip_json_fences(self, text: str):
+        """Remove markdown code fences from JSON response.
+
+        Strips triple backticks and language identifiers from AI responses.
+        """
         t = text.strip()
         if t.startswith("```"):
             t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
@@ -159,6 +196,11 @@ class CreateQuizView(views.APIView):
         return t
 
     def _validate_quiz_json(self, data: dict):
+        """Validate quiz JSON structure and content.
+
+        Ensures quiz has required fields and exactly 10 valid questions
+        with 4 unique options each.
+        """
         if not isinstance(data, dict):
             raise ValueError("Invalid quiz format.")
         
@@ -189,13 +231,21 @@ class CreateQuizView(views.APIView):
                 raise ValueError("Answer must be one of the question_options.")
             
 class QuizListView(views.APIView):
+    """Handle listing all quizzes for the authenticated user."""
+
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        """Retrieve all quizzes owned by the authenticated user."""
         quizzes = Quiz.objects.filter(user=request.user).prefetch_related("questions").order_by("-created_at")
         return response.Response(QuizSerializer(quizzes, many=True).data, status=status.HTTP_200_OK)
 
 def build_gemini_quiz_prompt(transcript: str):
+    """Build a structured prompt for Gemini AI to generate quiz questions.
+
+    Creates a detailed prompt with JSON schema, requirements, and the
+    video transcript for quiz generation.
+    """
     return f"""Based on the following transcript, generate a quiz in valid JSON format.
 
 The quiz must follow this exact structure:
@@ -224,15 +274,25 @@ Transcript:
 """
 
 class QuizDetailView(views.APIView):
+    """Handle retrieval, updating, and deletion of individual quizzes."""
+
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, id):
+        """Retrieve a specific quiz with all questions.
+
+        Returns 403 if quiz doesn't belong to authenticated user.
+        """
         quiz = get_object_or_404(Quiz, id=id)
         if quiz.user_id != request.user.id:
             return response.Response({"detail": "Access denied - Quiz does not belong to the user."}, status=status.HTTP_403_FORBIDDEN)
         return response.Response(QuizSerializer(quiz).data, status=status.HTTP_200_OK)
 
     def patch(self, request, id):
+        """Update quiz title or description.
+
+        Returns 403 if quiz doesn't belong to authenticated user.
+        """
         quiz = get_object_or_404(Quiz, id=id)
         if quiz.user_id != request.user.id:
             return response.Response({"detail": "Access denied - Quiz does not belong to the user."}, status=status.HTTP_403_FORBIDDEN)
@@ -245,6 +305,10 @@ class QuizDetailView(views.APIView):
         return response.Response(QuizSerializer(quiz).data, status=status.HTTP_200_OK)
 
     def delete(self, request, id):
+        """Delete a quiz and all associated questions.
+
+        Returns 403 if quiz doesn't belong to authenticated user.
+        """
         quiz = get_object_or_404(Quiz, id=id)
         if quiz.user_id != request.user.id:
             return response.Response({"detail": "Access denied - Quiz does not belong to the user."}, status=status.HTTP_403_FORBIDDEN)

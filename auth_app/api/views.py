@@ -1,3 +1,5 @@
+"""API views for user authentication including registration, login, token refresh, and logout."""
+
 from django.contrib.auth.models import User
 from rest_framework import status, views, permissions, response
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -7,9 +9,12 @@ from .serializers import RegistrationSerializer, CookieTokenObtainPairSerializer
 
 
 class RegistrationView(views.APIView):
+    """Handle user registration."""
+
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
+        """Create a new user account."""
         serializer = RegistrationSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
@@ -18,10 +23,13 @@ class RegistrationView(views.APIView):
 
 
 class LoginView(TokenObtainPairView):
+    """Handle user login and set authentication cookies."""
+
     permission_classes = [permissions.AllowAny]
     serializer_class = CookieTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
+        """Authenticate user and set access and refresh tokens as HTTP-only cookies."""
         res = super().post(request, *args, **kwargs)
         if res.status_code != 200:
             return res
@@ -44,9 +52,12 @@ class LoginView(TokenObtainPairView):
 
 
 class CookieTokenRefreshView(TokenRefreshView):
+    """Handle token refresh using cookie-stored refresh token."""
+
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, *args, **kwargs):
+        """Refresh access token using the refresh token from cookies."""
         refresh = request.COOKIES.get("refresh_token")
         if not refresh:
             return response.Response({"detail": "Refresh token invalid or missing."}, status=status.HTTP_401_UNAUTHORIZED)
@@ -69,9 +80,12 @@ class CookieTokenRefreshView(TokenRefreshView):
 
 
 class LogoutView(views.APIView):
+    """Handle user logout and token invalidation."""
+
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        """Blacklist refresh token and delete authentication cookies."""
         refresh = request.COOKIES.get("refresh_token")
         if refresh:
             token = RefreshToken(refresh)

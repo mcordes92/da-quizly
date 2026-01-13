@@ -1,3 +1,5 @@
+"""URL configuration for authentication API endpoints."""
+
 from django.urls import path
 
 from .views import RegistrationView, LoginView, CookieTokenRefreshView, LogoutView

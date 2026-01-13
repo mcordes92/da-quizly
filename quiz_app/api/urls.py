@@ -1,3 +1,5 @@
+"""URL configuration for quiz API endpoints."""
+
 from django.urls import path
 from .views import CreateQuizView, QuizListView, QuizDetailView
 
