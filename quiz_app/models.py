@@ -13,6 +13,14 @@ class Quiz(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name = "Quiz"
+        verbose_name_plural = "Quizzes"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
 class Question(models.Model):
     """Model representing a quiz question with multiple choice options."""
 
@@ -22,3 +30,11 @@ class Question(models.Model):
     answer = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Question"
+        verbose_name_plural = "Questions"
+        ordering = ['id']
+
+    def __str__(self):
+        return f"{self.question_title[:50]}..." if len(self.question_title) > 50 else self.question_title
