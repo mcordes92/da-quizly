@@ -1,17 +1,11 @@
-"""API views for quiz creation, listing, and management using AI-powered content generation."""
+"""API views for quiz creation, listing, and management."""
 
-from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import status, views, permissions, response
 
-from quiz_app.models import Quiz, Question
+from quiz_app.models import Quiz
 from .serializers import CreateQuizSerializer, QuizSerializer, QuizUpdateSerializer
-from .utils import (
-    normalize_youtube_url,
-    get_transcript_with_ytdlp_and_whisper,
-    generate_quiz_with_gemini,
-    validate_quiz_json,
-)
+from .services import QuizService
 
 class CreateQuizView(views.APIView):
     """Handle quiz creation from YouTube video URLs using AI-generated content."""
@@ -21,8 +15,8 @@ class CreateQuizView(views.APIView):
     def post(self, request):
         """Create a new quiz from a YouTube video URL.
 
-        Extract transcript from video, generate quiz questions using AI,
-        and save the quiz with questions to the database.
+        Validates URL, delegates to service layer for processing,
+        and returns the created quiz.
         """
         serializer = CreateQuizSerializer(data=request.data)
 
@@ -30,35 +24,9 @@ class CreateQuizView(views.APIView):
             return response.Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         raw_url = serializer.validated_data["url"]
-        normalized_url = normalize_youtube_url(raw_url)
-
-        if not normalized_url:
-            return response.Response({"error": "Invalid YouTube URL."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            transcript = get_transcript_with_ytdlp_and_whisper(normalized_url)
-            if not transcript or len(transcript.strip()) < 50:
-                return response.Response({"detail": "No Transcript Found."}, status=status.HTTP_400_BAD_REQUEST)
-
-            quiz_json = generate_quiz_with_gemini(transcript)
-            validate_quiz_json(quiz_json)
-
-            with transaction.atomic():
-                quiz = Quiz.objects.create(
-                    user=request.user,
-                    title=quiz_json["title"],
-                    description=quiz_json["description"],
-                    video_url=normalized_url,
-                )
-
-                for q in quiz_json["questions"]:
-                    Question.objects.create(
-                        quiz=quiz,
-                        question_title=q["question_title"],
-                        question_options=q["question_options"],
-                        answer=q["answer"],
-                    )
-
+            quiz = QuizService.create_quiz_from_youtube(request.user, raw_url)
             return response.Response(QuizSerializer(quiz).data, status=status.HTTP_201_CREATED)
 
         except ValueError as e:

@@ -1,17 +1,6 @@
-"""Utility functions for quiz generation from YouTube videos."""
+"""Utility helper functions for quiz application."""
 
-import json
-import os
 import re
-import tempfile
-import subprocess
-
-import whisper
-from yt_dlp import YoutubeDL
-from google import genai
-
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 
 def normalize_youtube_url(url: str):
@@ -25,56 +14,6 @@ def normalize_youtube_url(url: str):
         return None
     vid = m.group(1)
     return f"https://www.youtube.com/watch?v={vid}"
-
-
-def get_transcript_with_ytdlp_and_whisper(url: str):
-    """Download video audio and transcribe it using Whisper.
-
-    Downloads audio from YouTube video, converts to WAV format,
-    and uses OpenAI Whisper for speech-to-text transcription.
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "%(id)s.%(ext)s")
-
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": out,
-            "quiet": True,
-            "noplaylist": True,
-        }
-
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_id = info.get("id")
-
-        if not video_id:
-            return None
-
-        downloaded = None
-
-        for f in os.listdir(tmp):
-            if f.startswith(video_id + "."):
-                downloaded = os.path.join(tmp, f)
-                break
-
-        if not downloaded or not os.path.isfile(downloaded):
-            return None
-
-        wav_path = os.path.join(tmp, f"{video_id}.wav")
-
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", downloaded, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
-
-        model = whisper.load_model("base")
-        result = model.transcribe(wav_path)
-
-        text = (result.get("text") or "").strip()
-
-        return text if len(text) >= 50 else None
 
 
 def vtt_to_text(vtt_content: str):
@@ -102,36 +41,6 @@ def vtt_to_text(vtt_content: str):
     return text
 
 
-def generate_quiz_with_gemini(transcript: str):
-    """Generate quiz questions from transcript using Google Gemini AI.
-
-    Sends transcript to Gemini API with structured prompt and
-    returns parsed JSON with quiz data.
-    """
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY is not set.")
-
-    client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
-    prompt = build_gemini_quiz_prompt(transcript)
-
-    result = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-    )
-
-    raw = (getattr(result, "text", None) or "").strip()
-
-    if not raw:
-        raise ValueError("AI has failed the Job: Empty response from model.")
-
-    raw = strip_json_fences(raw)
-
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        raise ValueError(f"AI has failed the Job: {str(e)}")
-
-
 def strip_json_fences(text: str):
     """Remove markdown code fences from JSON response.
 
@@ -143,42 +52,6 @@ def strip_json_fences(text: str):
         t = re.sub(r"\s*```$", "", t)
         t = t.strip()
     return t
-
-
-def validate_quiz_json(data: dict):
-    """Validate quiz JSON structure and content.
-
-    Ensures quiz has required fields and exactly 10 valid questions
-    with 4 unique options each.
-    """
-    if not isinstance(data, dict):
-        raise ValueError("Invalid quiz format.")
-
-    if "title" not in data or "description" not in data or "questions" not in data:
-        raise ValueError("Missing required quiz fields.")
-
-    questions = data["questions"]
-
-    if not isinstance(questions, list) or len(questions) != 10:
-        raise ValueError("Quiz must contain exactly 10 questions.")
-
-    for q in questions:
-        if not isinstance(q, dict):
-            raise ValueError("Invalid question format.")
-
-        for k in ["question_title", "question_options", "answer"]:
-            if k not in q:
-                raise ValueError("Question is missing.")
-
-        opts = q["question_options"]
-        ans = q["answer"]
-
-        if not isinstance(opts, list) or len(opts) != 4:
-            raise ValueError("Every question must have exactly 4 options.")
-        if len(set(opts)) != 4:
-            raise ValueError("Options must be unique.")
-        if ans not in opts:
-            raise ValueError("Answer must be one of the question_options.")
 
 
 def build_gemini_quiz_prompt(transcript: str):
